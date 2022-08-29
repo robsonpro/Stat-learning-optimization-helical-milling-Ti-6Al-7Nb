@@ -1,1 +1,3 @@
-# Stat-learning-optimization-helical-milling-Ti-6Al-7Nb
+# Statistical learning and optimization of the helical milling of the biocompatible titanium Ti-6Al-7Nb alloy
+
+Repository of the code to perform the analysis of the paper "Statistical learning and optimization of the helical milling of the biocompatible titanium Ti-6Al-7Nb alloy" to be published in the Journal...
