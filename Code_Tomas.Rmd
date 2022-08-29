@@ -1,0 +1,928 @@
+---
+title: "Statistical learning and optimization of the helical milling of the biocompatible titanium Ti-6Al-7Nb alloy"
+author: "Robson Bruno Dutra Pereira, Tomás Barbosa da Costa"
+date: "2022-07-28"
+output: html_document
+---
+
+## Experimental Design and measurements
+
+### Libraries used in the analysis
+
+```{r, results="hide"}
+library(rsm)
+library(ggplot2)
+library(GGally)
+library(dplyr)
+library(randomForest)
+library(e1071)
+library(ggpubr)
+library(mco)
+library(RColorBrewer)
+```
+
+### CCD and roughness results
+
+Firstly the central composite design is defined and the roughness measurements are stored.
+
+```{r}
+plan2 <- ccd(~x1+x2+x3, 
+             n0 = c(0,4), 
+             alpha = "rotatable",
+             randomize = FALSE, 
+             oneblock=TRUE, 
+             coding = list(x1 ~ (fza - .03)/.01, 
+                           x2 ~ (fzt - 3)/1, 
+                           x3 ~ (vc - 60)/10))
+
+plan2$Ra <- c(0.1783333, 0.3041667, 0.1891667, 0.1450000, 0.1175000, 0.2900000, 0.2008333, 0.1700000, 0.1875000, 0.1966667, 0.3508333, 0.1083333, 0.1316667, 0.1575000, 0.1400000, 0.1241667, 0.1316667, 0.1216667)
+plan2$Rq <- c(0.2208333, 0.3675000, 0.2391667, 0.1775000, 0.1450000, 0.3791667, 0.2500000, 0.2025000, 0.2166667, 0.2425000, 0.4225000, 0.1366667, 0.1650000, 0.1916667, 0.1700000, 0.1525000, 0.1641667, 0.1458333)
+plan2$Rz <- c(0.9500000, 1.4916667, 1.0083333, 0.7833333, 0.6333333, 1.4583333, 1.0583333, 0.8583333, 1.0083333, 1.0083333, 1.6916667, 0.6166667, 0.7750000, 0.8000000, 0.7500000, 0.6500000, 0.7333333, 0.6500000)
+
+plan2
+```
+
+### Principal component analysis
+
+Some multivariate statistics and correlations are calculated.
+
+```{r}
+summary(plan2[,6:8]) # summary stats
+
+colMeans(plan2[,6:8]) # mean vector
+
+var(plan2[,6:8]) # covariance matrix
+
+r <- cor(plan2[,6:8]) # correlation matrix
+r
+```
+
+Visualization is also important to see the pattern of each variable and their relation.
+
+```{r}
+ggpairs(plan2, 
+        columns = c(6:8)) + theme_bw()
+
+```
+
+Following PCA is performed for dimensionality reduction.
+
+```{r}
+pca_rug <- prcomp(plan2[,6:8], scale = TRUE)
+pca_rug$sdev^2 # eigenvalues
+
+pca_rug$rotation # eigenvectors
+
+pca_rug2 <- princomp(plan2[,6:8], cor = TRUE, scores = TRUE)
+plan2$PC1 <- pca_rug2$scores[,1] # scores
+
+```
+
+## Learning process phase I
+
+### Response surface regression
+
+Firstly, a metrics function is defined.
+
+```{r}
+metrics <- function(pred, obs) {
+  
+  RSE <- sum((obs - pred)^2)
+  SST <- sum((obs - mean(obs))^2)
+  R2 <- 1 - RSE/SST 
+  
+  MSE <-  mean((obs - pred)^2)
+  
+  RMSE <- sqrt(mean((obs - pred)^2))
+  
+  MAE <-  mean(abs(obs - pred))
+  
+  return(
+    data.frame(RMSE = RMSE,
+               MSE = MSE,
+               R2 = R2, 
+               MAE = MAE))
+  
+}
+
+```
+
+RSM complete and reduced models are obtained through least squares considering the whole data. AIC is evaluated.
+
+```{r}
+comp1 <- lm(PC1 ~ x1 + x2 + x3 + x1*x2 + x1*x3 + x2*x3 + I(x1^2) + I(x2^2) + I(x3^2),
+            data = plan2)
+summary(comp1) # complete rsm model
+
+red_comp1 <- step(comp1)
+summary(red_comp1) # reduced rsm model
+```
+
+Leave-one-out cross-validation is performed to compared the complete and reduced models. Box-blots are obtained to compare the models. Wilcoxon rank sum test is performed to compare the models.
+
+```{r}
+
+nr <- 1:nrow(plan2)
+prop <- 1/18
+nfolds <- round(1/prop,0)
+fr <- round(prop*length(nr))
+
+res.teste_PC1 <- data.frame(fold = numeric(2*nfolds),
+                            method = character(2*nfolds),
+                            RMSE = numeric(2*nfolds),
+                            MSE = numeric(2*nfolds),
+                            Rsquared = numeric(2*nfolds),
+                            MAE = numeric(2*nfolds))
+
+set.seed(2)
+
+### 
+for (i in 1:nfolds) {
+  
+  fold <- sample(nr[!is.na(nr)], fr, replace = F)     
+  assign(paste0("fold", i),fold)                      
+  nr[fold] <- NA                                      
+  plan.tr <- plan2[-fold,]
+  
+  comp_PC1 <- lm(PC1 ~ x1 + x2 + x3 + x1*x2 + x1*x3 + x2*x3 + I(x1^2) + I(x2^2) + I(x3^2),
+                 data = plan.tr)
+  
+  red_PC1 <- lm(PC1 ~ x1 + x2 + x1*x2 + I(x1^2) + I(x2^2),
+                data = plan.tr)
+  
+  assign(paste0("comp_PC1.", i), comp_PC1)
+  assign(paste0("red_PC1.", i), red_PC1)
+  
+  res.teste.comp_PC1 <- predict(comp_PC1, newdata = plan2[fold,])
+  
+  res.teste.red_PC1 <- predict(red_PC1, newdata = plan2[fold,])
+  
+  testee.comp <- data.frame(obs = plan2$PC1[fold], 
+                           pred = res.teste.comp_PC1)
+  testee.red <- data.frame(obs = plan2$PC1[fold], 
+                          pred = res.teste.red_PC1)
+  
+  res.teste.comp <- metrics(testee.comp$pred, testee.comp$obs)
+  res.teste.red <- metrics(testee.red$pred, testee.red$obs)
+  
+  assign(paste0("res.teste.comp", i), (res.teste.comp))
+  assign(paste0("res.teste.red", i), (res.teste.red))
+  
+  j <- (i-1)*2+1
+  res.teste_PC1[j:(j+1),1] <- i
+  res.teste_PC1[j:(j+1),2] <- c("comp", "red")
+  res.teste_PC1[j,3:6]   <- (res.teste.comp)
+  res.teste_PC1[j+1,3:6] <- (res.teste.red)
+  
+}
+
+res.teste_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, MAE), list(name = mean))
+
+res.teste_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, MAE), list(name = median))
+
+library(ggplot2)
+ggplot(res.teste_PC1, aes(x = method, y = RMSE, col = method)) + 
+  stat_boxplot(geom = "errorbar",
+               width = 0.25) + 
+  geom_boxplot() + geom_jitter() + theme_bw()
+
+ggplot(res.teste_PC1, aes(x = method, y = MAE, col = method)) + 
+  stat_boxplot(geom = "errorbar",
+               width = 0.25) + 
+  geom_boxplot() + geom_jitter() + theme_bw()
+
+res <- wilcox.test(MSE ~ method, res.teste_PC1)
+res
+```
+
+### Tree based methods
+
+Bagging and random forest are also compared through leave-one-out cross-validation.
+
+```{r}
+nr <- 1:nrow(plan2)
+prop <- 1/18
+nfolds <- round(1/prop,0)
+fr <- round(prop*length(nr))
+
+res.teste_PC1 <- data.frame(fold = numeric(2*nfolds),
+                            method = character(2*nfolds),
+                            RMSE = numeric(2*nfolds),
+                            MSE = numeric(2*nfolds),
+                            Rsquared = numeric(2*nfolds),
+                            MAE = numeric(2*nfolds))
+
+set.seed(2)
+### 
+for (i in 1:nfolds) {
+  
+  fold <- sample(nr[!is.na(nr)], fr, replace = F) 
+  assign(paste0("fold", i),fold)  
+  nr[fold] <- NA
+  
+  plan.tr <- plan2[-fold,]
+
+  # bagging
+  bag_PC1 <- randomForest(PC1 ~ x1+x2+x3, data = plan.tr,
+                          mtry = 3, importance = TRUE, ntree = 500)
+  
+  # random forest
+  rf_PC1 <- randomForest(PC1 ~ x1+x2+x3, data = plan.tr,
+                          mtry = 1, importance = TRUE, ntree = 500)
+  
+  res.teste.bag_PC1 <- predict(bag_PC1, newdata = plan2[fold,])
+  res.teste.rf_PC1 <- predict(rf_PC1, newdata = plan2[fold,])
+  
+  testee.bag <- data.frame(obs = plan2$PC1[fold], 
+                           pred = res.teste.bag_PC1)
+  testee.rf <- data.frame(obs = plan2$PC1[fold], 
+                           pred = res.teste.rf_PC1)
+  
+  res.teste.bag <- metrics(testee.bag$pred, testee.bag$obs)
+  res.teste.rf <- metrics(testee.rf$pred, testee.rf$obs)
+  
+  j <- (i-1)*2+1
+  res.teste_PC1[j:(j+1),1] <- i
+  res.teste_PC1[j:(j+1),2] <- c("bag", "rf")
+  res.teste_PC1[j,3:6]   <- (res.teste.bag)
+  res.teste_PC1[j+1,3:6] <- (res.teste.rf)
+  
+}
+
+res.teste_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, MAE), list(name = mean))
+
+res.teste_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, MAE), list(name = median))
+
+ggplot(res.teste_PC1, aes(x = method, y = RMSE, col = method)) + 
+  stat_boxplot(geom = "errorbar",
+               width = 0.25) + 
+  geom_boxplot() + geom_jitter() + theme_bw()
+
+ggplot(res.teste_PC1, aes(x = method, y = MAE, col = method)) + 
+  stat_boxplot(geom = "errorbar",
+               width = 0.25) + 
+  geom_boxplot() + geom_jitter() + theme_bw()
+
+res <- wilcox.test(MSE ~ method, res.teste_PC1)
+res
+
+```
+
+### Support vector regression
+
+SVR hyperparamters are defined through k-fold. The first k-fold is for kernel selection.
+
+```{r}
+set.seed(1)
+tune.out <- tune(svm, PC1 ~ x1+x2+x3, data = plan2, 
+                 ranges = list(cost=c(0.001, 0.01, 0.1, 1, 5, 10),
+                               gamma = c(0, 0.5, 1, 2),
+                               kernel = c("linear", "radial", "polynomial")))
+summary(tune.out)
+```
+
+The second k-fold is to select $C$ and $\gamma$.
+
+```{r}
+tune.out2 <- tune(svm, Ra ~ x1+x2+x3, data = plan2, kernel = "radial",
+                  ranges = list(cost = seq(0.001, 10, by = 0.1),
+                                gamma = seq(0, 2, by = 0.01)))
+tune.out2$best.parameters
+
+tune_res <- data.frame(tune.out2$performances)
+
+error_svm <- ggplot(data = tune_res,
+                  mapping = aes(x = cost, y = gamma, 
+                                z = sqrt(error), 
+                                fill = sqrt(error))) +
+  geom_tile() +
+  labs(fill = "RMSE") +
+  scale_fill_distiller(palette = "Spectral",
+                       direction = -1) +
+  # geom_contour(color = "gray50") + 
+  xlab("cost") + ylab("gamma") + theme_bw()
+error_svm
+
+```
+
+## Learning process phase II
+
+In the second phase of learning the models previously selected are compared. A bootstrap cross-validation with optimism corrected performance is performed.
+
+```{r, results="hide"}
+lm_ <- lm(PC1 ~ x1 + x2 + x1:x2 + I(x1^2) + I(x2^2), plan2)
+bag_ <- randomForest(PC1 ~ x1+x2+x3, data = plan2,
+                        mtry = 3, importance = TRUE, ntree = 500)
+svm_ <- svm(PC1 ~ x1+x2+x3, data = plan2, kernel = "radial", 
+               cost = 9.901, gamma = 0.14)
+
+### Apparent Performance
+perf_lm  <- metrics(lm_$fitted.values, plan2$PC1)
+perf_bag <- metrics(bag_$predicted, plan2$PC1)
+perf_svm <- metrics(svm_$fitted, plan2$PC1)
+
+perf_lm
+perf_bag
+perf_svm
+
+nr <- 1:nrow(plan2)
+B <- 200
+
+res.teste_PC1 <- data.frame(fold = numeric(3*B),
+                            method = character(3*B),
+                            RMSE = numeric(3*B),
+                            MSE = numeric(3*B),
+                            Rsquared = numeric(3*B),
+                            MAE = numeric(3*B))
+
+optm_PC1 <- data.frame(fold = numeric(3*B),
+                       method = character(3*B),
+                       RMSE = numeric(3*B),
+                       MSE = numeric(3*B),
+                       Rsquared = numeric(3*B),
+                       MAE = numeric(3*B))
+
+set.seed(3)
+### 
+for (i in 1:B) {
+  ###
+  fold <- sample(nr, length(nr), replace = T) 
+  plan.tr <- plan2[fold,]
+  
+  lm_PC1 <- lm(PC1 ~ x1 + x2 + x1:x2 + I(x1^2) + I(x2^2), plan.tr)
+  bag_PC1 <- randomForest(PC1 ~ x1+x2+x3, data = plan.tr,
+                          mtry = 3, importance = TRUE, ntree = 500)
+  svm_PC1 <- svm(PC1 ~ x1+x2+x3, data = plan.tr, kernel = "radial", 
+                 cost = 9.901, gamma = 0.14)
+  
+  # Boot performance
+  perf_boot_lm  <- metrics(lm_PC1$fitted.values, plan.tr$PC1)
+  perf_boot_bag <- metrics(bag_PC1$predicted, plan.tr$PC1)
+  perf_boot_svm <- metrics(svm_PC1$fitted, plan.tr$PC1)
+  
+  ###
+  res.teste.lm_PC1 <- predict(lm_PC1, newdata = plan2)
+  res.teste.bag_PC1 <- predict(bag_PC1, newdata = plan2)
+  res.teste.svm_PC1 <- predict(svm_PC1, newdata = plan2)
+  
+  ###
+  testee.rsm <- data.frame(obs = plan2$PC1, 
+                           pred = res.teste.lm_PC1)
+  testee.bag <- data.frame(obs = plan2$PC1, 
+                           pred = res.teste.bag_PC1)
+  testee.svm <- data.frame(obs = plan2$PC1, 
+                           pred = res.teste.svm_PC1)
+  
+  # Test performance
+  res.teste.rsm <- metrics(testee.rsm$pred, testee.rsm$obs)
+  res.teste.bag <- metrics(testee.bag$pred, testee.bag$obs)
+  res.teste.svm <- metrics(testee.svm$pred, testee.svm$obs)
+  
+  ### Optimism 
+  optm_lm  <- perf_boot_lm  - res.teste.rsm 
+  optm_bag <- perf_boot_bag - res.teste.bag 
+  optm_svm <- perf_boot_svm - res.teste.svm 
+
+  ###
+  j <- (i-1)*3+1
+  res.teste_PC1[j:(j+2),1] <- i
+  res.teste_PC1[j:(j+2),2] <- c("rsm", "bag", "svm")
+  res.teste_PC1[j,3:6]   <- (res.teste.rsm)
+  res.teste_PC1[j+1,3:6] <- (res.teste.bag)
+  res.teste_PC1[j+2,3:6] <- (res.teste.svm)
+  
+  optm_PC1[j:(j+2),1] <- i
+  optm_PC1[j:(j+2),2] <- c("rsm", "bag", "svm")
+  
+  optm_PC1[j,3:6]   <- (optm_lm)
+  optm_PC1[j+1,3:6] <- (optm_bag)
+  optm_PC1[j+2,3:6] <- (optm_svm)
+ 
+}
+
+###
+boot_mean <- res.teste_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, Rsquared, MAE), list(name = mean))
+
+boot_mean <- data.frame(boot_mean)
+boot_mean
+
+boot_median <- res.teste_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, Rsquared, MAE), list(name = median))
+
+boot_median <- data.frame(boot_median)
+boot_median
+
+###
+optm_mean <- optm_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, Rsquared, MAE), list(name = mean))
+
+optm_mean <- data.frame(optm_mean)
+optm_mean
+
+optm_median <- optm_PC1 %>%
+  group_by(method) %>%
+  summarise_at(vars(RMSE, MSE, Rsquared, MAE), list(name = median))
+
+optm_median <- data.frame(optm_median)
+optm_median
+
+# Optimism correctd performance
+# mean
+perf_lm - optm_mean[2,2:5]
+### bag
+perf_bag - optm_mean[1,2:5]
+### svm
+perf_svm - optm_mean[3,2:5]
+### xgb
+# perf_xgb - optm_mean[4,2:5]
+
+# median
+perf_lm - optm_median[2,2:5]
+### bag
+perf_bag - optm_median[1,2:5]
+### svm
+perf_svm - optm_median[3,2:5]
+
+###
+ggplot(res.teste_PC1, aes(x = method, y = RMSE, color = method)) + 
+  stat_boxplot(geom = "errorbar",
+               width = 0.25) + 
+  geom_boxplot() + geom_jitter(alpha = 0.25) + theme_bw()
+
+ggplot(res.teste_PC1, aes(x = method, y = MAE, color = method)) + 
+  stat_boxplot(geom = "errorbar",
+               width = 0.25) + 
+  geom_boxplot() + geom_jitter(alpha = 0.25) + theme_bw()
+
+###
+kruskal.test(MSE ~ method, res.teste_PC1)
+pairwise.wilcox.test(res.teste_PC1$MSE, res.teste_PC1$method,
+                     p.adjust.method = "BH")
+
+```
+
+## Model interpretation
+
+SVR model effects and interactions are evaluated through plots.
+
+```{r}
+svm_PC1 <- svm(PC1 ~ x1+x2+x3, data = plan2, kernel = "radial", 
+               cost = 5.901, gamma = 0.2)
+svm_PC1
+teste.svm_PC1 <- predict(svm_PC1, newdata = plan2)
+metrics(teste.svm_PC1, plan2$PC1)
+
+### 
+x1_grid_pc1 <- seq(min(plan2$x1), max(plan2$x1), 0.1)
+
+p1_pc1 <- ggplot() +        
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, 
+                                              newdata = data.frame(x1 = x1_grid_pc1, 
+                                                                   x2 = 0, 
+                                                                   x3 = 0)))),
+            colour = 'cadetblue4') +
+  ggtitle('PC1 vs fza') +
+  xlab('fza') +
+  ylab('PC1') + 
+  ylim(-2.5,4.5) + 
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(0.02, 0.03, 0.04)) + 
+  theme_bw()
+
+p2_pc1 <- ggplot() +        
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, 
+                                              newdata = data.frame(x1 = 0, 
+                                                                   x2 = x1_grid_pc1, 
+                                                                   x3 = 0)))),
+            colour = 'cadetblue4') +
+  ggtitle('PC1 vs fzt') +
+  xlab('fzt') +
+  ylab('PC1') + 
+  ylim(-2.5,4.5) + 
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(2, 3, 4)) + 
+  theme_bw()
+
+p3_pc1 <- ggplot() +        
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, 
+                                              newdata = data.frame(x1 = 0, 
+                                                                   x2 = 0, 
+                                                                   x3 = x1_grid_pc1)))),
+            colour = 'cadetblue4') +
+  ggtitle('PC1 vs vc') +
+  xlab('vc') +
+  ylab('PC1') + 
+  ylim(-2.5,4.5) + 
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(50, 60, 70)) + 
+  theme_bw()
+ggarrange(p1_pc1, p2_pc1, p3_pc1, nrow = 1)
+
+
+### 
+pp_12a_pc1 <- ggplot() +        
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, newdata = data.frame(x1 = x1_grid_pc1, 
+                                                                            x2 = 0, 
+                                                                            x3 = 0))),
+                colour = '3', linetype = '3')) +
+  ggtitle('PC1 vs fza,fzt') +
+  xlab('fza') +
+  ylab('PC1') + 
+  ylim(-2.5,4.5) + 
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(0.02, 0.03, 0.04)) + 
+  theme_bw()
+
+pp_12_pc1 <- pp_12a_pc1 + 
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, newdata = data.frame(x1 = x1_grid_pc1, 
+                                                                            x2 = -1, 
+                                                                            x3 = 0))),
+                colour = '2', linetype = '2')) +
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, newdata = data.frame(x1 = x1_grid_pc1, 
+                                                                            x2 = 1, 
+                                                                            x3 = 0))),
+                colour = '4', linetype = '4')) + 
+  scale_color_manual(name = "fzt", 
+                     values = c("2" = "orange2", 
+                                "3" = "olivedrab3", 
+                                "4" = "mediumvioletred")) + 
+  scale_linetype_manual(name = "fzt", 
+                        values = c("2" = "dashed", 
+                                   "3" = "longdash", 
+                                   "4" = "solid"))
+
+pp_13a_pc1 <- ggplot() +        
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, newdata = data.frame(x1 = x1_grid_pc1, 
+                                                                            x2 = 0, 
+                                                                            x3 = 0))),
+                colour = '60', linetype = '60')) +
+  ggtitle('PC1 vs fza,vc') +
+  xlab('fza') +
+  ylab('PC1') + 
+  ylim(-2.5,4.5) +
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(0.02, 0.03, 0.04)) + 
+  theme_bw()
+
+pp_13_pc1 <- pp_13a_pc1 + 
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, 
+                                              newdata = data.frame(x1 = x1_grid_pc1, 
+                                                                   x2 = 0, 
+                                                                   x3 = -1))),
+                colour = '50', linetype = '50')) +
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, 
+                                              newdata = data.frame(x1 = x1_grid_pc1, 
+                                                                   x2 = 0, 
+                                                                   x3 = 1))),
+                colour = '70', linetype = '70')) + 
+  scale_color_manual(name = "vc", 
+                     values = c("50" = "orange2", 
+                                "60" = "olivedrab3", 
+                                "70" = "mediumvioletred")) + 
+  scale_linetype_manual(name = "vc", 
+                        values = c("50" = "dashed", 
+                                   "60" = "longdash", 
+                                   "70" = "solid"))
+
+pp_23a_pc1 <- ggplot() +        
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, newdata = data.frame(x1 = 0, 
+                                                                            x2 = x1_grid_pc1, 
+                                                                            x3 = 0))),
+                colour = '60', linetype = '60')) +
+  ggtitle('PC1 vs fzt,vc') +
+  xlab('fzt') +
+  ylab('PC1') + 
+  ylim(-2.5,4.5) +
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(2, 3, 4)) + 
+  theme_bw()
+
+pp_23_pc1 <- pp_23a_pc1 + 
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, 
+                                              newdata = data.frame(x1 = 0, 
+                                                                   x2 = x1_grid_pc1, 
+                                                                   x3 = -1))),
+                colour = '50', linetype = '50')) +
+  geom_line(aes(x = x1_grid_pc1, y = (predict(svm_PC1, 
+                                              newdata = data.frame(x1 = 0, 
+                                                                   x2 = x1_grid_pc1, 
+                                                                   x3 = 1))),
+                colour = '70', linetype = '70')) + 
+  scale_color_manual(name = "vc", 
+                     values = c("50" = "orange2", 
+                                "60" = "olivedrab3", 
+                                "70" = "mediumvioletred")) + 
+  scale_linetype_manual(name = "vc", 
+                        values = c("50" = "dashed", 
+                                   "60" = "longdash", 
+                                   "70" = "solid"))
+
+ggarrange(pp_12_pc1, pp_13_pc1, pp_23_pc1, nrow = 1)
+
+###
+x1grid_pc1 <- seq(min(plan2$x1), max(plan2$x1), 0.05)
+
+grid_pc1 <- expand.grid(x1 = x1grid_pc1,
+                        x2 = x1grid_pc1,
+                        x3 = 0)
+
+y_hat_pc1 <- predict(svm_PC1, newdata = grid_pc1)
+grid_pc1$PC1 <- y_hat_pc1
+
+cp1_pc1 <- ggplot(data = grid_pc1,
+                  mapping = aes(x = x1, y = x2, z = PC1, fill = PC1)) +
+  geom_tile() +
+  scale_fill_distiller(palette = "Spectral",
+                       direction = -1) +
+  geom_contour(color = "gray50") + 
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(0.02, 0.03, 0.04)) + 
+  scale_y_continuous(breaks = c(-1, 0, 1), label = c(2,3,4)) + 
+  xlab("fza") + ylab("fzt") + theme_bw()
+
+grid_pc1 <- expand.grid(x1 = x1grid_pc1,
+                        x2 = 0,
+                        x3 = x1grid_pc1)
+
+y_hat_pc1 <- predict(svm_PC1, newdata = grid_pc1)
+grid_pc1$PC1 <- y_hat_pc1
+
+cp2_pc1 <- ggplot(data = grid_pc1,
+                  mapping = aes(x = x1, y = x3, z = PC1, fill = PC1)) +
+  geom_tile() +
+  scale_fill_distiller(palette = "Spectral",
+                       direction = -1) +
+  geom_contour(color = "gray50") + 
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(0.02, 0.03, 0.04)) + 
+  scale_y_continuous(breaks = c(-1, 0, 1), label = c(50,60,70)) + 
+  xlab("fza") + ylab("vc") + theme_bw()
+
+grid_pc1 <- expand.grid(x1 = 0,
+                        x2 = x1grid_pc1,
+                        x3 = x1grid_pc1)
+
+y_hat_pc1 <- predict(svm_PC1, newdata = grid_pc1)
+grid_pc1$PC1 <- y_hat_pc1
+
+cp3_pc1 <- ggplot(data = grid_pc1,
+                  mapping = aes(x = x2, y = x3, z = PC1, fill = PC1)) +
+  geom_tile() +
+  scale_fill_distiller(palette = "Spectral",
+                       direction = -1) +
+  geom_contour(color = "gray50") + 
+  scale_x_continuous(breaks = c(-1, 0, 1), label = c(2,3,4)) + 
+  scale_y_continuous(breaks = c(-1, 0, 1), label = c(50,60,70)) + 
+  xlab("fzt") + ylab("vc") + theme_bw()
+
+ggarrange(cp1_pc1, cp2_pc1, cp3_pc1, nrow = 1)
+```
+
+## Multi-objective evolutionary optimization
+
+Multi-objective evolutionary optimization is performed through NSGA-II algorithm.
+
+```{r}
+
+ro <- (2^3)^0.25
+
+gg <- function(x){
+  g1 <- -x[1]^2 - x[2]^2 -x[3]^2 + ro^2
+  return(c(g1))
+}
+
+###
+PC1_MRR <- function(x){
+
+  
+  # f^_svr/PC1 
+  f1 <- predict(svm_PC1, newdata = data.frame(x1 = x[1],
+                                              x2 = x[2],
+                                              x3 = x[3]))
+  
+  z <- 4
+  Db <- 5
+  Dt <- 3
+  Dh <- Db-Dt
+  
+  fza <- x[1]*(0.04-0.02)/2 + 0.03
+  fzt <- x[2]*(0.004-0.002)/2 + 0.003
+  vc <-  x[3]*(70-50)/2 + 60
+  
+  # MRR
+  f2 <- -250*z*(Db^3/(Dh*Dt))*vc*((fza*10^-3)/fzt)*sqrt((fza*10^-3)^2 + (fzt*Dh/Db)^2)
+  
+  return(c(f1,f2))
+} 
+
+###
+opt2_pc1 <- nsga2(fn = PC1_MRR, 
+                  idim = 3,
+                  odim = 2, 
+                  constraints = gg,
+                  cdim = 1,
+                  lower.bounds = rep(-ro,3),
+                  upper.bounds = rep(ro,3), 
+                  popsize = 200, generations = 100)
+
+sol_opt2_pc1 <- opt2_pc1$value
+colnames(sol_opt2_pc1) <- c("PC1", "MRR")
+sol_opt2_pc1[,2] <- -sol_opt2_pc1[,2]
+niveis_opt2_pc1 <- opt2_pc1$par
+# write.csv(niveis_opt2_pc1, file = "niveis_opt2_pc1_svm.csv")
+colnames(niveis_opt2_pc1) <- c("fza", "fzt", "vc") # nomes das colunas
+
+niveis_opt2_pc1_decod <- data.frame(fza = niveis_opt2_pc1[,1]*(0.04-0.02)/2 + 0.03,
+                                    fzt = niveis_opt2_pc1[,2]*(4-2)/2 + 3,
+                                    vc = niveis_opt2_pc1[,3]*(70-50)/2 + 60) 
+head(niveis_opt2_pc1_decod)
+
+###
+ggplot(data.frame(sol_opt2_pc1), aes(x = PC1, y = MRR)) +
+  geom_point(color = "steelblue4") + 
+  xlab(expression(paste("f"^"svr"))) +
+  ylab(expression(paste("MRR [cm"^"3","/min]"))) + 
+  theme_bw()
+```
+
+The results are also studied in the design space.
+
+```{r}
+niveis_maxmrr <- niveis_opt2_pc1[which.max(sol_opt2_pc1[,1]),]
+niveis_minpc1 <- niveis_opt2_pc1[which.min(sol_opt2_pc1[,2]),]
+
+niveis_maxmrr_decod <- niveis_opt2_pc1_decod[which.max(sol_opt2_pc1[,1]),]
+niveis_minpc1_decod <- niveis_opt2_pc1_decod[which.min(sol_opt2_pc1[,2]),]
+
+###
+x1 <- seq(-1.681793,1.681793, length = 60) # x1 = fza coded
+x2 <- seq(-1.681793,1.681793, length = 60) # x2 = fzt coded
+x3 <- niveis_minpc1[3]
+xys <- expand.grid(x1,x2,x3)
+colnames(xys) <- c("x1", "x2", "x3")
+zs <- matrix(predict(svm_PC1, newdata = xys), nrow = length(x1)) # previsao modelo PC1
+
+MRR2 <- function(x1,x2,x3){
+
+  z <- 4
+  Db <- 5
+  Dt <- 3
+  Dh <- Db-Dt
+  
+  fza <- x1*(0.04-0.02)/2 + 0.03  
+  fzt <- x2*(0.004-0.002)/2 + 0.003 
+  vc <-  x3*(70-50)/2 + 60         
+  
+  f2 <- -250*z*(Db^3/(Dh*Dt))*vc*((fza*10^-3)/fzt)*sqrt((fza*10^-3)^2 + (fzt*Dh/Db)^2)
+  
+  return(f2)
+} 
+
+zs2 <- matrix((MRR2(xys[,1],xys[,2],niveis_maxmrr[3])), nrow = length(x1)) 
+
+par(mfrow = c(1,1), mar = c(4, 4, 0.1, 0.1))
+layout(matrix(1:2,ncol=2), width = c(2,.7),height = c(.7,2))
+contour(x=x1, y=x2, z=zs, col = "royalblue3", #  "#C71585", 
+        labcex = 1, method = "edge",
+        xlab = "x1", ylab = "x2")
+
+contour(x=x1, y=x2, z=zs2, col = "maroon", # "#15C757", 
+        labcex = 1, add = T, lty = 2)
+
+gx <- function(x) {
+  y = sqrt(sqrt(2^3) - x^2)
+  return(cbind(-y,y))
+}
+
+x_g <- seq(-(2^3)^.5, (2^3)^0.5, length = 100000)
+lines(x_g, gx(x_g)[,1], col = "black", lty = 3)
+lines(x_g, gx(x_g)[,2], col = "black", lty = 3)
+
+x_nsga2 <- niveis_opt2_pc1
+colnames(x_nsga2)<- c("x1","x2", "x3")
+
+legend("bottomleft", 
+       legend = c("svm.PC1", "MRR", "g(x)", "NSGA-II"),
+       lty = c(c(1,2,3),NA,NA), 
+       pch = c(rep(NA,3), 20, 19),
+       col = c("royalblue3", "maroon", "black", "seagreen"),
+       cex = .8, box.col = NA, bg="transparent")
+
+cols = brewer.pal(4, "Spectral")
+pal = colorRampPalette(cols)
+vc = findInterval(x_nsga2[,3], sort(x_nsga2[,3]))
+points(x_nsga2[,1:2], col = pal(nrow(x_nsga2))[vc], pch = 20)
+
+colfunc <- colorRampPalette(c("#2B83BA", "#ABDDA4", "#FDAE61", "#D7191C"))
+legend_image <-  as.raster(matrix(colfunc(20), ncol = 1))
+plot(c(0.5,4), c(0,1), type = "n", axes = F, ylab = "", xlab = "")
+title(ylab="x3", line=0, cex.lab=1.2)
+lab <- round(seq(min(x_nsga2[,3]), max(x_nsga2[,3]), l = 5), 2)
+text(x = 3, y = seq(0, 1, l = 5), labels = lab, cex = 1)
+rasterImage(legend_image, -1,0,1.5,1)
+
+###
+x1 <- seq(-1.681793,1.681793, length = 60) # x1 = fza coded
+x3 <- seq(-1.681793,1.681793, length = 60) # x2 = fzt coded
+x2 <- niveis_minpc1[2]
+xys <- expand.grid(x1,x2,x3)
+colnames(xys) <- c("x1", "x2", "x3")
+zs <- matrix(predict(svm_PC1, newdata = xys), nrow = length(x1))
+
+zs2 <- matrix((MRR2(xys[,1],niveis_maxmrr[2],xys[,3])), nrow = length(x1)) 
+
+par(mfrow = c(1,1), mar = c(4, 4, 0.1, 0.1))
+layout(matrix(1:2,ncol=2), width = c(2,.7),height = c(.7,2))
+contour(x=x1, y=x3, z=zs, col = "royalblue3", #  "#C71585", 
+        labcex = 1, method = "edge",
+        xlab = "x1", ylab = "x3")
+
+contour(x=x1, y=x3, z=zs2, col = "maroon", # "#15C757", 
+        labcex = 1, add = T, lty = 2)
+
+lines(x_g, gx(x_g)[,1], col = "black", lty = 3)
+lines(x_g, gx(x_g)[,2], col = "black", lty = 3)
+
+legend("bottomleft", 
+       legend = c("svm.PC1", "MRR", "g(x)", "NSGA-II"),
+       lty = c(c(1,2,3),NA,NA), 
+       pch = c(rep(NA,3), 20, 19),
+       col = c("royalblue3", "maroon", "black", "seagreen"),
+       cex = .8, box.col = NA, bg="transparent")
+
+cols = brewer.pal(4, "Spectral")
+pal = colorRampPalette(cols)
+fzt = findInterval(x_nsga2[,2], sort(x_nsga2[,2]))
+points(x_nsga2[,c(1,3)], col = pal(nrow(x_nsga2))[fzt], pch = 20)
+
+colfunc <- colorRampPalette(c("#2B83BA", "#ABDDA4", "#FDAE61", "#D7191C"))
+legend_image <-  as.raster(matrix(colfunc(20), ncol = 1))
+plot(c(0.5,4), c(0,1), type = "n", axes = F, ylab = "", xlab = "")
+title(ylab="x2", line=0, cex.lab=1.2)
+lab <- round(seq(min(x_nsga2[,2]), max(x_nsga2[,2]), l = 5), 2)
+text(x = 3, y = seq(0, 1, l = 5), labels = lab, cex = 1)
+rasterImage(legend_image, -1,0,1.5,1)
+
+```
+
+Finally, some discussion on extreme and knee points is done.
+
+```{r}
+
+Db <- 5     # hole diameter
+Dt <- 3     # tool diameter
+Dh <- Db-Dt # helix diameter
+z  <- 4     # number of teeth
+
+### Min_PC1
+ap_minpc1 <- niveis_minpc1_decod[1]*10^-3*pi*Db/(niveis_minpc1_decod[2]*10^-3)
+ap_minpc1
+
+n_minpc1 <- 1000*niveis_minpc1_decod[3]/(pi*Dt)
+n_minpc1
+
+vfha_minpc1 <- niveis_minpc1_decod[1]*10^-3*z*n_minpc1
+vfht_minpc1 <- niveis_minpc1_decod[2]*10^-3*z*n_minpc1*Dh/Db
+vf_minpc1 <- sqrt(vfha_minpc1^2 + vfht_minpc1^2)
+vf_minpc1
+
+### Max MRR
+ap_maxmrr <- niveis_maxmrr_decod[1]*10^-3*pi*Db/(niveis_maxmrr_decod[2]*10^-3)
+ap_maxmrr
+
+n_maxmrr <- 1000*niveis_maxmrr_decod[3]/(pi*Dt)
+n_maxmrr
+
+vfha_maxmrr <- niveis_maxmrr_decod[1]*10^-3*z*n_maxmrr
+vfht_maxmrr <- niveis_maxmrr_decod[2]*10^-3*z*n_maxmrr*Dh/Db
+vf_maxmrr <- sqrt(vfha_maxmrr^2 + vfht_maxmrr^2)
+vf_maxmrr
+
+### knee
+sol_norm_pc1 <- (sol_opt2_pc1[,1] - min(sol_opt2_pc1[,1]))/
+  (max(sol_opt2_pc1[,1]) - min(sol_opt2_pc1[,1]))
+sol_norm_mrr <- (-sol_opt2_pc1[,2] - min(-sol_opt2_pc1[,2]))/
+  (max(-sol_opt2_pc1[,2]) - min(-sol_opt2_pc1[,2]))
+sol_norm <- data.frame(sol_norm_pc1, sol_norm_mrr)
+
+Dist <- numeric(200)
+Dist <- apply(sol_norm, 1, function(x) sqrt(x[1]^2 + x[2]^2))
+head(sol_norm)
+
+niveisknee <- niveis_opt2_pc1_decod[which.min(Dist),]
+ap_knee <- niveisknee[1]*10^-3*pi*Db/(niveisknee[2]*10^-3)
+ap_knee
+
+n_knee <- 1000*niveisknee[3]/(pi*Dt)
+n_knee
+
+vfha_knee <- niveisknee[1]*10^-3*z*n_knee
+vfht_knee <- niveisknee[2]*10^-3*z*n_knee*Dh/Db
+vf_knee <- sqrt(vfha_knee^2 + vfht_knee^2)
+vf_knee
+```
+
