@@ -1,6 +1,9 @@
 # Statistical learning and optimization of the helical milling of the biocompatible titanium Ti-6Al-7Nb alloy
 
-Repository of the code to perform the analysis of the paper "Statistical learning and optimization of the helical milling of the biocompatible titanium Ti-6Al-7Nb alloy" to be published in the Journal...
+Repository of the code to perform the analysis of the paper "Statistical learning and optimization of the helical milling of the biocompatible titanium Ti-6Al-7Nb alloy" to be published in the The International Journal of Advanced Manufacturing Technology.
+
+https://rdcu.be/c3sbP
+https://link.springer.com/article/10.1007/s00170-022-10686-2
 
 ## R code to reproduce the analysis performed in the investigation
 
